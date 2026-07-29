@@ -1,0 +1,12 @@
+streamlit
+torch
+open_clip_torch
+numpy
+pillow
+qdrant-client
+streamlit-drawable-canvas
+streamlit-cropper
+pandas
+opencv-python
+pytesseract
+tqdm

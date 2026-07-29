@@ -10,10 +10,9 @@ from tqdm import tqdm
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 
-DATABASE_CSV = r'C:\Users\Asus\embroidery-finder\design_database.csv'
-QDRANT_PATH = r'C:\Users\Asus\embroidery-finder\qdrant_db'
-COLLECTION_NAME = "embroidery_designs"
-VECTOR_SIZE = 768
+from config import DATABASE_CSV, QDRANT_PATH, DESIGN_COLLECTION as COLLECTION_NAME, VECTOR_SIZE
+from view_type import classify_view_type
+
 BATCH_SIZE = 64
 
 parser = argparse.ArgumentParser(description="Fingerprint embroidery preview images for visual search.")
@@ -74,6 +73,11 @@ def to_edges_3ch(pil_image, blur_kernel=9):
 df = pd.read_csv(DATABASE_CSV)
 print(f"Database CSV rows: {len(df)}")
 
+if "view_type" not in df.columns:
+    print("No view_type column found - classifying now (see view_type.py)...")
+    df["view_type"] = df["file_name"].apply(classify_view_type)
+    df.to_csv(DATABASE_CSV, index=False)
+
 def get_existing_point_ids():
     existing_ids = set()
     offset = None
@@ -130,7 +134,8 @@ for idx, row in tqdm(rows_to_fingerprint.iterrows(), total=len(rows_to_fingerpri
                 'image_path': row['image_path'],
                 'design_name': row['design_name'],
                 'file_name': row['file_name'],
-                'designer': row.get('designer', 'Krishna')
+                'designer': row.get('designer', 'Krishna'),
+                'view_type': row.get('view_type', 'other')
             }
         ))
         if len(points) >= BATCH_SIZE:

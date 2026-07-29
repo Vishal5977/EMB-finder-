@@ -19,16 +19,24 @@ import uuid
 from datetime import datetime
    
 import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+from config import (
+    TESSERACT_CMD,
+    QDRANT_PATH,
+    DATABASE_CSV,
+    MEMORY_CSV,
+    DESIGN_COLLECTION,
+    MEMORY_COLLECTION,
+    VECTOR_SIZE,
+    HIGH_CONFIDENCE_SCORE,
+    MEMORY_SCORE_THRESHOLD,
+    REPEAT_MATCH_BONUS,
+    REPEAT_MATCH_BONUS_CAP,
+)
+from view_type import add_view_type_column
+from search_log import log_search
 
-QDRANT_PATH = r'C:\Users\Asus\embroidery-finder\qdrant_db'
-DATABASE_CSV = r'C:\Users\Asus\embroidery-finder\design_database.csv'
-MEMORY_CSV = r'C:\Users\Asus\embroidery-finder\match_memory.csv'
-DESIGN_COLLECTION = "embroidery_designs"
-MEMORY_COLLECTION = "embroidery_match_memory"
-VECTOR_SIZE = 768
-HIGH_CONFIDENCE_SCORE = 0.92
-MEMORY_SCORE_THRESHOLD = 0.82
+if TESSERACT_CMD:
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
 if not hasattr(st_image, "image_to_url"):
     def canvas_image_to_url(image, width, clamp, channels, output_format, image_id):
@@ -44,6 +52,8 @@ if not hasattr(st_image, "image_to_url"):
     st_image.image_to_url = canvas_image_to_url
 
 design_df = pd.read_csv(DATABASE_CSV)
+if "view_type" not in design_df.columns:
+    design_df = add_view_type_column(design_df)
 
 COLOR_RANGES = {
     "pink_magenta": ([130, 40, 40], [175, 255, 255]),
@@ -236,20 +246,22 @@ def query_vector_for_image(image, model, preprocess, device):
         features = features / features.norm(dim=-1, keepdim=True)
         return features.cpu().numpy()[0]
 
-def designer_query_filter(selected_designers):
+def designer_query_filter(selected_designers, selected_view_types=None):
+    conditions = []
     if selected_designers:
-        return Filter(
-            must=[
-                FieldCondition(
-                    key="designer",
-                    match=MatchAny(any=selected_designers),
-                )
-            ]
+        conditions.append(
+            FieldCondition(key="designer", match=MatchAny(any=selected_designers))
         )
+    if selected_view_types:
+        conditions.append(
+            FieldCondition(key="view_type", match=MatchAny(any=selected_view_types))
+        )
+    if conditions:
+        return Filter(must=conditions)
     return None
 
-def search_design(image, model, preprocess, device, client, selected_designers, top_k=35):
-    query_filter = designer_query_filter(selected_designers)
+def search_design(image, model, preprocess, device, client, selected_designers, selected_view_types=None, top_k=35):
+    query_filter = designer_query_filter(selected_designers, selected_view_types)
     combined_results = []
     for _, variant_image in search_variants(image):
         query_vector = query_vector_for_image(variant_image, model, preprocess, device).tolist()
@@ -277,6 +289,7 @@ def save_memory_match(image, model, preprocess, device, client, design_number, r
                     "design_number": str(design_number).strip(),
                     "designer": str(first_row["designer"]).strip(),
                     "design_name": str(first_row["design_name"]),
+                    "view_type": str(first_row.get("view_type", "other")),
                     "source": "review",
                 },
             )
@@ -302,11 +315,11 @@ def find_rows_by_design_number(design_number, search_df):
         & (search_df["design_name"].astype(str) == str(first["design_name"]))
     ]
 
-def find_memory_matches(image, search_df, model, preprocess, device, client, selected_designers, threshold=MEMORY_SCORE_THRESHOLD):
+def find_memory_matches(image, search_df, model, preprocess, device, client, selected_designers, selected_view_types=None, threshold=MEMORY_SCORE_THRESHOLD):
     if not collection_exists(client, MEMORY_COLLECTION):
         return []
 
-    query_filter = designer_query_filter(selected_designers)
+    query_filter = designer_query_filter(selected_designers, selected_view_types)
     matches = []
 
     for variant_name, variant_image in search_variants(image):
@@ -372,9 +385,22 @@ def group_visual_results(results, search_df, max_groups=5):
             "score": result.score,
         })
 
+    # Weighted re-ranking (Step 3): a design that shows up multiple times in
+    # the raw results (its front AND sleeve both matched, or it matched
+    # across several rotated/cropped search variants) is more likely to be
+    # the real answer than a design that only landed one lucky hit. Each
+    # extra corroborating hit adds a small, capped bonus on top of the raw
+    # CLIP similarity score, instead of only being used as a tiebreaker.
+    for group in groups.values():
+        extra_hits = max(0, len(group["matched_files"]) - 1)
+        bonus = REPEAT_MATCH_BONUS * min(extra_hits, REPEAT_MATCH_BONUS_CAP)
+        group["match_count"] = len(group["matched_files"])
+        group["repeat_bonus"] = round(bonus, 4)
+        group["confidence_score"] = min(1.0, group["best_score"] + bonus)
+
     ranked_groups = sorted(
         groups.values(),
-        key=lambda group: (group["best_score"], len(group["matched_files"])),
+        key=lambda group: (group["confidence_score"], group["match_count"]),
         reverse=True,
     )
     return ranked_groups[:max_groups]
@@ -453,6 +479,21 @@ selected_designers = st.multiselect(
     help="Select one or more designers to search only those designs. Leave empty to search all designers.",
 )
 
+view_type_counts = design_df["view_type"].value_counts()
+view_type_options = view_type_counts.index.tolist()
+selected_view_types = st.multiselect(
+    "View type filter",
+    view_type_options,
+    format_func=lambda view_type: f"{view_type} ({view_type_counts[view_type]})",
+    help=(
+        "Select the photo's view (front/sleeve/butta/back) to restrict search to only "
+        "that view instead of comparing against every view type at once. Leave empty to "
+        "search all view types. NOTE: this only restricts the vector search itself once "
+        "qdrant_db has been re-fingerprinted with view_type payloads (run "
+        "`python fingerprint.py --rebuild` after pulling this update)."
+    ),
+)
+
 uploaded_file = st.file_uploader("Upload Customer Image", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file:
@@ -508,17 +549,20 @@ if uploaded_file:
         img_cv2 = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
         search_df = design_df
         if selected_designers:
-            search_df = design_df[
-                design_df["designer"].astype(str).str.strip().isin(selected_designers)
+            search_df = search_df[
+                search_df["designer"].astype(str).str.strip().isin(selected_designers)
             ]
+        if selected_view_types:
+            search_df = search_df[search_df["view_type"].isin(selected_view_types)]
 
+        filter_bits = []
+        if selected_designers:
+            filter_bits.append(f"{len(selected_designers)} selected designer(s)")
+        if selected_view_types:
+            filter_bits.append(f"view type(s): {', '.join(selected_view_types)}")
         st.caption(
             f"Searching {len(search_df)} designs"
-            + (
-                f" from {len(selected_designers)} selected designer(s)."
-                if selected_designers
-                else " from all designers."
-            )
+            + (f" — {'; '.join(filter_bits)}." if filter_bits else " from all designers/view types.")
         )
 
         with st.spinner("Step 1: Checking for design code..."):
@@ -527,6 +571,14 @@ if uploaded_file:
         if code:
             st.success(f"Design Code Found: {code} - Exact Match!")
             st.subheader(f"DST Files for Design {code}:")
+
+            log_search(
+                ocr_code_found=True,
+                ocr_code_value=code,
+                top1_design_name=code,
+                view_type_filter=selected_view_types,
+                designer_filter=selected_designers,
+            )
 
             for idx, row in code_rows.iterrows():
                 with st.expander(f"{row['file_name']}"):
@@ -554,6 +606,13 @@ if uploaded_file:
                 st.success(
                     f"Catalogue Match Found: {matched_design} "
                     f"({matched_designer}) - Exact Photo Match!"
+                )
+                log_search(
+                    catalogue_match_found=True,
+                    top1_design_name=matched_design,
+                    top1_designer=matched_designer,
+                    view_type_filter=selected_view_types,
+                    designer_filter=selected_designers,
                 )
                 st.caption(
                     f"Verified with {catalogue_match['inliers']} matching image points "
@@ -584,6 +643,7 @@ if uploaded_file:
                         preprocess,
                         device,
                         selected_designers,
+                        selected_view_types,
                     )
 
                 if memory_matches:
@@ -618,6 +678,7 @@ if uploaded_file:
                         device,
                         client,
                         selected_designers,
+                        selected_view_types,
                     )
 
                 st.subheader("Top Matching Designs (Visual Search):")
@@ -632,8 +693,23 @@ if uploaded_file:
 
                 grouped_results = group_visual_results(results, search_df)
 
+                top1 = grouped_results[0] if grouped_results else None
+                best_memory = max(memory_matches, key=lambda m: m["score"]) if memory_matches else None
+                log_search(
+                    memory_match_found=bool(memory_matches),
+                    memory_match_score=round(best_memory["score"], 4) if best_memory else None,
+                    top1_design_name=top1["design_name"] if top1 else "",
+                    top1_designer=top1["designer"] if top1 else "",
+                    top1_confidence_score=round(top1["confidence_score"], 4) if top1 else None,
+                    top1_match_count=top1["match_count"] if top1 else None,
+                    view_type_filter=selected_view_types,
+                    designer_filter=selected_designers,
+                )
+
                 for i, group in enumerate(grouped_results):
                     score = round(group["best_score"] * 100, 2)
+                    confidence = round(group["confidence_score"] * 100, 2)
+                    match_count = group["match_count"]
                     design_name = group["design_name"]
                     designer = group["designer"]
                     rows = group["rows"]
@@ -651,12 +727,18 @@ if uploaded_file:
 
                     with st.expander(
                         f"Match {i+1} - Design: {display_code} | "
-                        f"Designer: {designer} | Best Score: {score}% | "
+                        f"Designer: {designer} | Confidence: {confidence}% | "
                         f"Files: {len(rows)}"
                     ):
                         st.write("**Design Code:**", display_code)
                         st.write("**Designer:**", designer)
                         st.write("**Best Match Score:**", f"{score}%")
+                        if match_count > 1:
+                            st.write(
+                                "**Confidence Score:**",
+                                f"{confidence}% (boosted from {score}% — matched "
+                                f"{match_count} times across views/crops, a corroboration signal)",
+                            )
                         if matched_file_text:
                             st.write("**Closest matched files:**", matched_file_text)
 

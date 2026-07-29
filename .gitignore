@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+search_log.csv
+match_memory.csv
