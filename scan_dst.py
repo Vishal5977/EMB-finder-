@@ -1,10 +1,24 @@
 import os
+import argparse
 import pyembroidery
 import pandas as pd
 from tqdm import tqdm
-#py -3.11 "C:\Users\Asus\embroidery-finder\scan_dst.py"
-DESIGNS_FOLDER = r'C:\Users\Asus\all pendrive design\dual hybrid\Varsha Creations'
-DESIGNER_NAME = 'Varsha Creations'
+
+parser = argparse.ArgumentParser(description="Add DST files for one designer to the embroidery database.")
+parser.add_argument(
+    "--folder",
+    default=r"C:\Users\Asus\all pendrive design\dual hybrid\Varsha Creations",
+    help="Designer folder containing DST files.",
+)
+parser.add_argument(
+    "--designer",
+    default="Varsha Creations",
+    help="Designer name to save in design_database.csv.",
+)
+args = parser.parse_args()
+
+DESIGNS_FOLDER = args.folder
+DESIGNER_NAME = args.designer
 
 OUTPUT_FOLDER = r'C:\Users\Asus\embroidery-finder\dst_images'
 CSV_PATH = r'C:\Users\Asus\embroidery-finder\design_database.csv'
@@ -42,6 +56,7 @@ if len(new_dst_files) == 0:
 else:
     results = []
     failed = []
+    combined_df = existing_df.copy()
 
     for dst_path in tqdm(new_dst_files, desc="Converting DST files"):
         try:
@@ -49,22 +64,23 @@ else:
             safe_name = f"{DESIGNER_NAME}_" + relative_path.replace(os.sep, '_').replace('.DST', '.png').replace('.dst', '.png')
             image_path = os.path.join(OUTPUT_FOLDER, safe_name)
 
-            pattern = pyembroidery.read(dst_path)
-            pyembroidery.write(pattern, image_path)
+            if not os.path.exists(image_path):
+                pattern = pyembroidery.read(dst_path)
+                pyembroidery.write(pattern, image_path)
 
-            results.append({
+            row = {
                 'dst_path': dst_path,
                 'image_path': image_path,
                 'design_name': os.path.basename(os.path.dirname(dst_path)),
                 'file_name': os.path.basename(dst_path),
                 'designer': DESIGNER_NAME
-            })
+            }
+            results.append(row)
+            combined_df = pd.concat([combined_df, pd.DataFrame([row])], ignore_index=True)
+            combined_df.to_csv(CSV_PATH, index=False)
+            existing_dst_paths.add(dst_path)
         except Exception as e:
             failed.append({'dst_path': dst_path, 'error': str(e)})
-
-    new_df = pd.DataFrame(results)
-    combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-    combined_df.to_csv(CSV_PATH, index=False)
 
     print(f"\nDone!")
     print(f"Newly added: {len(results)}")

@@ -1,0 +1,23 @@
+cd /d C:\Users\Asus\embroidery-finder
+py -3.11 -m streamlit run app.py --server.port 8502
+
+
+
+COMMANDS FOR AADING NEW DESIGNS TO DATABASE 
+cd /d C:\Users\Asus\embroidery-finder
+
+py -3.11 scan_dst.py --folder "C:\Users\Asus\all pendrive design\dual hybrid\NEW_FOLDER" --designer "DESIGNER_NAME"
+
+py -3.11 fingerprint.py
+
+py -3.11 -m streamlit run app.py --server.port 8502
+
+py -3.11 -m streamlit run "C:\Users\Asus\embroidery-finder\app.py"
+
+to rebuild 
+py -3.11 fingerprint.py --rebuild
+
+commands to check the newly designs 
+cd "C:\Users\Asus\embroidery-finder"
+py -3.11 scan_all_designers.py
+py -3.11 scan_dst.py --designer "Prithviraj Designs" --folder "C:\Users\Asus\all pendrive design\dual

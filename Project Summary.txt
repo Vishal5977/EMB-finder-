@@ -1,0 +1,124 @@
+PROJECT: Krishna Embroidery Finder
+
+GOAL:
+Customer uploads embroidery/fabric photo -> app finds matching DST file from local designer database.
+
+PROJECT PATH:
+C:\Users\Asus\embroidery-finder
+
+APP COMMAND:
+cd /d C:\Users\Asus\embroidery-finder
+py -3.11 -m streamlit run app.py --server.port 8502
+
+APP URL:
+http://localhost:8502
+
+ARCHITECTURE:
+1. OCR/code search:
+   Detects printed design numbers using color masks + Tesseract OCR.
+
+2. Catalogue image search:
+   Uses catalogue_matcher.py with SIFT-style photo matching.
+   Exists but still limited.
+
+3. Visual similarity search:
+   Uses CLIP ViT-L-14 embeddings + local Qdrant vector database.
+
+VISUAL PREPROCESSING:
+App and fingerprint use same edge pipeline:
+GaussianBlur(gray, (9, 9), 0)
+Canny(blurred, 50, 150)
+
+IMPORTANT FILES:
+app.py                 Streamlit UI and search flow
+scan_dst.py            Adds new DST folders/designers into design_database.csv
+scan_all_designers.py  Scans all registered designer folders and adds missing DST files
+designer_folders.csv   Registered designer names and folder paths for repeat scanning
+fingerprint.py         Creates/updates Qdrant visual fingerprints
+design_database.csv    Main metadata database
+dst_images/            Rendered preview PNGs from DST files
+qdrant_db/             Local Qdrant vector database
+catalogue_matcher.py   Catalogue photo matching
+
+NORMAL WORKFLOW TO ADD DESIGNER:
+cd /d C:\Users\Asus\embroidery-finder
+
+py -3.11 scan_dst.py --folder "FULL_DESIGNER_FOLDER_PATH" --designer "DESIGNER_NAME"
+
+py -3.11 fingerprint.py
+
+py -3.11 -m streamlit run app.py --server.port 8502
+
+NORMAL WORKFLOW TO CHECK OLD DESIGNERS FOR NEW FILES:
+cd /d C:\Users\Asus\embroidery-finder
+
+py -3.11 scan_all_designers.py
+
+py -3.11 fingerprint.py
+
+When buying new designs from an old designer, save them inside that designer's registered folder.
+When adding a new designer, add the folder to designer_folders.csv first.
+
+IMPORTANT:
+fingerprint.py normal mode is incremental.
+It fingerprints only newly added CSV rows.
+
+FULL REBUILD ONLY IF NEEDED:
+py -3.11 fingerprint.py --rebuild
+
+RECENT FIXES:
+- app.py visual preprocessing bug fixed.
+- blur=9 before Canny selected for fabric texture noise.
+- display correction added for metadata mismatch cases like folder "Design 0527" but file name "0572".
+- scan_dst.py accepts --folder and --designer.
+- scan_dst.py saves progress after each file and reuses existing preview PNGs.
+- scan_all_designers.py scans designer_folders.csv and adds only missing DST files.
+- fingerprint.py now supports incremental mode and --rebuild mode.
+- suggestion/cache UI was tried and removed. Current app has no feedback cache.
+
+CURRENT APP FLOW:
+Upload image -> rotate -> crop -> OCR search -> catalogue search -> visual top 5.
+
+KNOWN ISSUES:
+- Accuracy still needs testing on hard real fabric photos.
+- Fabric shine/folds/texture can affect visual search.
+- Cropping matters a lot.
+- Some folder/design metadata is inconsistent.
+- OCR struggles with rotated/diagonal text.
+- Catalogue search is not fully built out.
+
+EDITABLE STATUS BLOCK:
+Last updated: 2026-07-02
+
+Total searchable designs: 2018
+Qdrant fingerprints saved: 2018
+
+Designer counts:
+Krishna: 50
+Bindu: 496
+Varsha Creations: 427
+Amula: 17
+EXTRA: 23
+Prithviraj Designs: 294
+Rajashekar designs: 24
+shilpa designs: 71
+shilpa-100 designs: 616
+Amula: 17
+
+Latest added designer:
+Rajashekar designs
+
+Latest added folder:
+C:\Users\Asus\all pendrive design\dual hybrid\Rajashekar designs
+
+Latest added count:
+24
+
+Latest scan result:
+All-designer scan: added 24, failed 0, total 2018
+
+Latest fingerprint result:
+Already fingerprinted 1994, newly fingerprinted 24, failed 0
+
+NEXT STEP:
+Save new files into the correct registered designer folder, run scan_all_designers.py, then run incremental fingerprint.py.

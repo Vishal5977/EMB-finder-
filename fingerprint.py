@@ -1,4 +1,5 @@
 import os
+import argparse
 import torch
 import open_clip
 import pandas as pd
@@ -11,6 +12,17 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 
 DATABASE_CSV = r'C:\Users\Asus\embroidery-finder\design_database.csv'
 QDRANT_PATH = r'C:\Users\Asus\embroidery-finder\qdrant_db'
+COLLECTION_NAME = "embroidery_designs"
+VECTOR_SIZE = 768
+BATCH_SIZE = 64
+
+parser = argparse.ArgumentParser(description="Fingerprint embroidery preview images for visual search.")
+parser.add_argument(
+    "--rebuild",
+    action="store_true",
+    help="Delete the visual search database and fingerprint every design again.",
+)
+args = parser.parse_args()
 
 print("Loading AI model...")
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -25,32 +37,81 @@ print("Setting up search database...")
 os.makedirs(QDRANT_PATH, exist_ok=True)
 client = QdrantClient(path=QDRANT_PATH)
 
-try:
-    client.delete_collection(collection_name="embroidery_designs")
-    print("Old collection deleted")
-except Exception as e:
-    print("No old collection to delete")
+def create_collection():
+    client.create_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE)
+    )
+    print(f"Search database created with {VECTOR_SIZE} dimensions!")
 
-client.create_collection(
-    collection_name="embroidery_designs",
-    vectors_config=VectorParams(size=768, distance=Distance.COSINE)
-)
-print("Search database created with 768 dimensions!")
+def collection_exists():
+    try:
+        client.get_collection(collection_name=COLLECTION_NAME)
+        return True
+    except Exception:
+        return False
 
-def to_edges_3ch(pil_image):
+if args.rebuild:
+    try:
+        client.delete_collection(collection_name=COLLECTION_NAME)
+        print("Old collection deleted")
+    except Exception:
+        print("No old collection to delete")
+    create_collection()
+elif not collection_exists():
+    create_collection()
+else:
+    print("Existing search database found. Only missing designs will be fingerprinted.")
+
+def to_edges_3ch(pil_image, blur_kernel=9):
     img_array = np.array(pil_image.convert('RGB'))
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-    edges = cv2.Canny(gray, 50, 150)
+    blurred = cv2.GaussianBlur(gray, (blur_kernel, blur_kernel), 0)
+    edges = cv2.Canny(blurred, 50, 150)
     edges_rgb = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
     return Image.fromarray(edges_rgb)
 
 df = pd.read_csv(DATABASE_CSV)
-print(f"Found {len(df)} designs to fingerprint")
+print(f"Database CSV rows: {len(df)}")
+
+def get_existing_point_ids():
+    existing_ids = set()
+    offset = None
+    while True:
+        records, offset = client.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=10000,
+            offset=offset,
+            with_payload=False,
+            with_vectors=False,
+        )
+        existing_ids.update(int(record.id) for record in records)
+        if offset is None:
+            break
+    return existing_ids
+
+if args.rebuild:
+    rows_to_fingerprint = df
+else:
+    existing_point_ids = get_existing_point_ids()
+    print(f"Already fingerprinted: {len(existing_point_ids)}")
+    rows_to_fingerprint = df.loc[~df.index.isin(existing_point_ids)]
+
+print(f"New designs to fingerprint: {len(rows_to_fingerprint)}")
+
+if rows_to_fingerprint.empty:
+    print("\nDone!")
+    print("Fingerprints created: 0")
+    print("Failed: 0")
+    print("AI search database is already up to date.")
+    client.close()
+    raise SystemExit(0)
 
 points = []
 failed = []
+created = 0
 
-for idx, row in tqdm(df.iterrows(), total=len(df), desc="Creating fingerprints"):
+for idx, row in tqdm(rows_to_fingerprint.iterrows(), total=len(rows_to_fingerprint), desc="Creating fingerprints"):
     try:
         image = Image.open(row['image_path']).convert('RGB')
         edge_image = to_edges_3ch(image)
@@ -72,17 +133,26 @@ for idx, row in tqdm(df.iterrows(), total=len(df), desc="Creating fingerprints")
                 'designer': row.get('designer', 'Krishna')
             }
         ))
+        if len(points) >= BATCH_SIZE:
+            client.upsert(
+                collection_name=COLLECTION_NAME,
+                points=points
+            )
+            created += len(points)
+            points = []
 
     except Exception as e:
         failed.append({'path': row['image_path'], 'error': str(e)})
 
-print("Saving fingerprints to search database...")
-client.upsert(
-    collection_name="embroidery_designs",
-    points=points
-)
+if points:
+    client.upsert(
+        collection_name=COLLECTION_NAME,
+        points=points
+    )
+    created += len(points)
 
 print(f"\nDone!")
-print(f"Fingerprints created: {len(points)}")
+print(f"Fingerprints created: {created}")
 print(f"Failed: {len(failed)}")
 print("AI search database is ready! (Edge-detection mode)")
+client.close()
